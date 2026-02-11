@@ -1,0 +1,41 @@
+# Phosphor Configuration
+# Copy this file to ~/.config/phosphor/config.toml
+
+[theme]
+# Amber CRT color scheme
+background = "#1a1000"
+foreground = "#ffb000"
+accent = "#ffcc00"
+dim = "#664400"
+
+[layout]
+# Panels: spotify, spectrum, waveform, git
+rows = [
+    ["spotify", "spectrum"],
+    ["git", "waveform"]
+]
+
+[spotify]
+# Spotify API credentials
+# You can also set RSPOTIFY_CLIENT_ID and RSPOTIFY_CLIENT_SECRET environment variables
+# Get credentials at https://developer.spotify.com/dashboard
+client_id = ""
+# client_secret is stored in keyring or RSPOTIFY_CLIENT_SECRET env var
+
+[audio]
+# Audio input device name (empty = default)
+# For PipeWire/PulseAudio loopback, you might need to set up a monitor source
+device = ""
+# FFT size for spectrum analysis (power of 2)
+fft_size = 2048
+# Refresh rate in frames per second
+fps = 30
+
+[git]
+# Paths to git repositories to track
+repos = [
+    "~/Projects/project1",
+    "~/Projects/project2",
+]
+# Maximum number of recent commits to display
+max_commits = 10

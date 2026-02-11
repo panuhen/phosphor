@@ -1,0 +1,43 @@
+[package]
+name = "phosphor"
+version = "0.1.0"
+edition = "2024"
+description = "Retro terminal dashboard with amber CRT aesthetic"
+authors = ["phosphor"]
+
+[features]
+default = []
+audio = ["cpal"]
+
+[dependencies]
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# TUI
+ratatui = "0.29"
+crossterm = "0.28"
+
+# Async
+tokio = { version = "1", features = ["full"] }
+
+# Config
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }
+dirs = "5"
+
+# Spotify
+rspotify = { version = "0.13", features = ["cli"] }
+
+# Audio capture & FFT (optional, requires libasound2-dev on Linux)
+cpal = { version = "0.15", optional = true }
+rustfft = "6"
+
+# Git (use vendored libs to avoid needing libssl-dev and libssh2)
+git2 = { version = "0.19", features = ["vendored-libgit2", "vendored-openssl"] }
+
+# Misc
+anyhow = "1"
+shellexpand = "3"
+
+# Vendored OpenSSL for rspotify
+openssl = { version = "0.10", features = ["vendored"] }
