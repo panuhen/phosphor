@@ -115,7 +115,7 @@ max_commits = 10
 ## Spotify Setup
 
 1. Create an app at [Spotify Developer Dashboard](https://developer.spotify.com/dashboard)
-2. Set redirect URI to `http://localhost:8888/callback`
+2. Set redirect URI to `http://127.0.0.1:8888/callback`
 3. Add your `client_id` to config or set environment variables:
    ```bash
    export RSPOTIFY_CLIENT_ID="your_client_id"

@@ -37,7 +37,7 @@ impl SpotifyClient {
             .context("Spotify credentials not found. Set RSPOTIFY_CLIENT_ID and RSPOTIFY_CLIENT_SECRET environment variables, or configure client_id in config.toml")?;
 
         let oauth = OAuth {
-            redirect_uri: "http://localhost:8888/callback".to_string(),
+            redirect_uri: "http://127.0.0.1:8888/callback".to_string(),
             scopes: scopes!(
                 "user-read-playback-state",
                 "user-modify-playback-state",
