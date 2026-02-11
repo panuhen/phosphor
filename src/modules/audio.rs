@@ -20,17 +20,56 @@ pub struct AudioCapture {
 }
 
 #[cfg(feature = "audio")]
+fn get_default_monitor_source() -> Option<String> {
+    // Try to get the default sink's monitor source using pactl
+    let output = std::process::Command::new("pactl")
+        .args(["get-default-sink"])
+        .output()
+        .ok()?;
+
+    if output.status.success() {
+        let sink_name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !sink_name.is_empty() {
+            return Some(format!("{}.monitor", sink_name));
+        }
+    }
+    None
+}
+
+#[cfg(feature = "audio")]
 impl AudioCapture {
     pub fn new(device_name: &str, fft_size: usize) -> Result<Self> {
         let host = cpal::default_host();
 
-        let device = if device_name.is_empty() {
-            host.default_input_device()
-                .context("No default input device available")?
-        } else {
+        let device = if !device_name.is_empty() {
+            // User specified a device
             host.input_devices()?
                 .find(|d| d.name().map(|n| n.contains(device_name)).unwrap_or(false))
                 .context(format!("Device '{}' not found", device_name))?
+        } else {
+            // Auto-detect: try monitor source first, then any monitor, then default
+            let monitor_name = get_default_monitor_source();
+
+            let device = if let Some(ref monitor) = monitor_name {
+                host.input_devices()?
+                    .find(|d| d.name().map(|n| n.contains(monitor)).unwrap_or(false))
+            } else {
+                None
+            };
+
+            // If no default monitor found, try any device with "monitor" in the name
+            let device = device.or_else(|| {
+                host.input_devices().ok()?.find(|d| {
+                    d.name()
+                        .map(|n| n.to_lowercase().contains("monitor"))
+                        .unwrap_or(false)
+                })
+            });
+
+            // Fall back to default input device
+            device
+                .or_else(|| host.default_input_device())
+                .context("No audio input device available")?
         };
 
         let config = device.default_input_config()?;
