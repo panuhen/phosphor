@@ -3,9 +3,10 @@ use git2::{Repository, StatusOptions};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct RepoStatus {
     pub name: String,
-    pub path: PathBuf,
+    pub path: PathBuf,  // Kept for future "open in terminal" feature
     pub branch: String,
     pub is_clean: bool,
     pub ahead: usize,

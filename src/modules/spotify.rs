@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use crate::config::Config;
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct TrackInfo {
     pub name: String,
     pub artist: String,
@@ -16,7 +17,7 @@ pub struct TrackInfo {
     pub duration: u64,
     pub progress: Option<u64>,
     pub is_playing: bool,
-    pub album_art_url: Option<String>,
+    pub album_art_url: Option<String>,  // Kept for future album art rendering
 }
 
 pub struct SpotifyClient {
