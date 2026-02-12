@@ -37,6 +37,8 @@ pub enum Commands {
 pub enum SpotifyCommands {
     /// Show currently playing track
     Now,
+    /// Show synced lyrics for current track
+    Lyrics,
     /// Resume playback
     Play,
     /// Pause playback

@@ -21,12 +21,14 @@ use crate::config::Config;
 use crate::modules::{
     audio::{AudioData, AudioSource, SmoothedAudio},
     git::{CommitInfo, GitTracker, RepoStatus},
+    lyrics::{fetch_lyrics, LyricsStatus, SyncedLyrics},
     spotify::{SpotifyClient, TrackInfo},
 };
 use crate::tui::theme::Theme;
 use crate::tui::widgets::{
     album_art::{AlbumArtWidget, ArtStyle, ImageCache},
-    git::{GitWidget, HelpWidget},
+    git::HelpWidget,
+    lyrics::LyricsWidget,
     spotify::SpotifyWidget,
     visualizer::{SpectrumWidget, WaveformWidget},
 };
@@ -35,6 +37,7 @@ use image::DynamicImage;
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Panel {
     Spotify,
+    Lyrics,
     Spectrum,
     Waveform,
     AlbumArt,
@@ -43,7 +46,8 @@ enum Panel {
 impl Panel {
     fn next(self) -> Self {
         match self {
-            Panel::Spotify => Panel::Spectrum,
+            Panel::Spotify => Panel::Lyrics,
+            Panel::Lyrics => Panel::Spectrum,
             Panel::Spectrum => Panel::Waveform,
             Panel::Waveform => Panel::AlbumArt,
             Panel::AlbumArt => Panel::Spotify,
@@ -80,6 +84,14 @@ struct App {
     current_album_art: Option<DynamicImage>,
     last_album_art_url: Option<String>,
     art_style: ArtStyle,
+    // Lyrics
+    lyrics_status: LyricsStatus,
+    current_lyrics: Option<SyncedLyrics>,
+    last_lyrics_track: Option<(String, String)>,
+    show_lyrics: bool,
+    last_spotify_poll: Instant,
+    last_known_progress_ms: u64,
+    was_playing: bool,
 }
 
 impl App {
@@ -132,6 +144,14 @@ impl App {
             current_album_art: None,
             last_album_art_url: None,
             art_style: ArtStyle::Braille,
+            // Lyrics
+            lyrics_status: LyricsStatus::NotFound,
+            current_lyrics: None,
+            last_lyrics_track: None,
+            show_lyrics: true,
+            last_spotify_poll: Instant::now(),
+            last_known_progress_ms: 0,
+            was_playing: false,
         };
 
         // Initial git fetch
@@ -152,8 +172,44 @@ impl App {
                     .as_ref()
                     .and_then(|url| self.image_cache.get_or_fetch(url));
             }
+
+            // Track progress for lyrics interpolation
+            if let Some(ref track) = track_info {
+                self.last_known_progress_ms = track.progress.unwrap_or(0);
+                self.was_playing = track.is_playing;
+                self.last_spotify_poll = Instant::now();
+
+                // Check if track changed for lyrics
+                let track_key = (track.name.clone(), track.artist.clone());
+                if self.last_lyrics_track.as_ref() != Some(&track_key) {
+                    self.last_lyrics_track = Some(track_key);
+                    self.lyrics_status = LyricsStatus::Loading;
+                    self.current_lyrics = None;
+
+                    // Fetch lyrics
+                    let status = fetch_lyrics(
+                        &track.name,
+                        &track.artist,
+                        &track.album,
+                        track.duration / 1000, // Convert ms to seconds
+                    );
+                    if let LyricsStatus::Available(ref lyrics) = status {
+                        self.current_lyrics = Some(lyrics.clone());
+                    }
+                    self.lyrics_status = status;
+                }
+            }
+
             self.track_info = track_info;
         }
+    }
+
+    fn current_progress_ms(&self) -> u64 {
+        if !self.was_playing {
+            return self.last_known_progress_ms;
+        }
+        let elapsed = self.last_spotify_poll.elapsed().as_millis() as u64;
+        self.last_known_progress_ms + elapsed
     }
 
     fn update_git(&mut self) {
@@ -221,6 +277,10 @@ impl App {
                     ArtStyle::Braille => ArtStyle::Blocks,
                 };
             }
+            KeyCode::Char('l') => {
+                // Toggle lyrics display
+                self.show_lyrics = !self.show_lyrics;
+            }
             _ => {}
         }
         false
@@ -238,16 +298,26 @@ impl App {
             }
         }
 
-        // Stacked vertical layout: Spotify, Spectrum, Waveform, AlbumArt
-        let rows = Layout::vertical([
-            Constraint::Length(9),      // Spotify - fixed height for track info
-            Constraint::Percentage(20), // Spectrum - smaller
-            Constraint::Percentage(20), // Waveform - smaller
-            Constraint::Min(10),        // Album Art - more space
-        ])
-        .split(area);
+        // Stacked vertical layout: Spotify, Lyrics/AlbumArt, Spectrum, Waveform
+        let rows = if self.show_lyrics {
+            Layout::vertical([
+                Constraint::Length(9),      // Spotify - fixed height for track info
+                Constraint::Min(8),         // Lyrics - takes album art space
+                Constraint::Percentage(15), // Spectrum - smaller
+                Constraint::Percentage(15), // Waveform - smaller
+            ])
+            .split(area)
+        } else {
+            Layout::vertical([
+                Constraint::Length(9),      // Spotify - fixed height for track info
+                Constraint::Percentage(20), // Spectrum - smaller
+                Constraint::Percentage(20), // Waveform - smaller
+                Constraint::Min(10),        // Album Art - more space
+            ])
+            .split(area)
+        };
 
-        // Render widgets in stacked order
+        // Render Spotify widget
         let spotify_widget = SpotifyWidget::new(
             self.track_info.as_ref(),
             &self.theme,
@@ -255,27 +325,54 @@ impl App {
         );
         frame.render_widget(spotify_widget, rows[0]);
 
-        let spectrum_widget = SpectrumWidget::new(
-            &self.audio_data,
-            &self.theme,
-            self.focused_panel == Panel::Spectrum,
-        );
-        frame.render_widget(spectrum_widget, rows[1]);
+        if self.show_lyrics {
+            // Lyrics mode: Lyrics, Spectrum, Waveform
+            let lyrics_widget = LyricsWidget::new(
+                self.current_lyrics.as_ref(),
+                &self.lyrics_status,
+                self.current_progress_ms(),
+                &self.theme,
+                self.focused_panel == Panel::Lyrics,
+            );
+            frame.render_widget(lyrics_widget, rows[1]);
 
-        let waveform_widget = WaveformWidget::new(
-            &self.audio_data,
-            &self.theme,
-            self.focused_panel == Panel::Waveform,
-        );
-        frame.render_widget(waveform_widget, rows[2]);
+            let spectrum_widget = SpectrumWidget::new(
+                &self.audio_data,
+                &self.theme,
+                self.focused_panel == Panel::Spectrum,
+            );
+            frame.render_widget(spectrum_widget, rows[2]);
 
-        let album_art_widget = AlbumArtWidget::new(
-            self.current_album_art.as_ref(),
-            &self.theme,
-            self.focused_panel == Panel::AlbumArt,
-            self.art_style,
-        );
-        frame.render_widget(album_art_widget, rows[3]);
+            let waveform_widget = WaveformWidget::new(
+                &self.audio_data,
+                &self.theme,
+                self.focused_panel == Panel::Waveform,
+            );
+            frame.render_widget(waveform_widget, rows[3]);
+        } else {
+            // Album art mode: Spectrum, Waveform, AlbumArt
+            let spectrum_widget = SpectrumWidget::new(
+                &self.audio_data,
+                &self.theme,
+                self.focused_panel == Panel::Spectrum,
+            );
+            frame.render_widget(spectrum_widget, rows[1]);
+
+            let waveform_widget = WaveformWidget::new(
+                &self.audio_data,
+                &self.theme,
+                self.focused_panel == Panel::Waveform,
+            );
+            frame.render_widget(waveform_widget, rows[2]);
+
+            let album_art_widget = AlbumArtWidget::new(
+                self.current_album_art.as_ref(),
+                &self.theme,
+                self.focused_panel == Panel::AlbumArt,
+                self.art_style,
+            );
+            frame.render_widget(album_art_widget, rows[3]);
+        }
 
         // Render help overlay if active
         if self.show_help {

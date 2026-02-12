@@ -39,10 +39,11 @@ git2 = { version = "0.19", features = ["vendored-libgit2", "vendored-openssl"] }
 anyhow = "1"
 shellexpand = "3"
 open = "5"
+urlencoding = "2"
 
 # Image processing for album art
 image = "0.25"
-ureq = "2"
+ureq = { version = "2", features = ["json"] }
 
 # Vendored OpenSSL for rspotify
 openssl = { version = "0.10", features = ["vendored"] }

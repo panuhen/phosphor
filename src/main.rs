@@ -71,6 +71,45 @@ async fn handle_spotify(command: SpotifyCommands) -> Result<()> {
             spotify.set_volume(level).await?;
             println!("🔊 Volume: {}%", level);
         }
+        SpotifyCommands::Lyrics => {
+            if let Some(track) = spotify.get_current_track().await? {
+                println!("♪ {} - {}", track.name, track.artist);
+                println!("  Fetching lyrics from LRClib...\n");
+
+                let status = modules::lyrics::fetch_lyrics(
+                    &track.name,
+                    &track.artist,
+                    &track.album,
+                    track.duration / 1000,
+                );
+
+                match status {
+                    modules::lyrics::LyricsStatus::Available(lyrics) => {
+                        println!("Found {} synced lines:\n", lyrics.lines.len());
+                        for line in lyrics.lines.iter().take(20) {
+                            let mins = line.timestamp_ms / 60000;
+                            let secs = (line.timestamp_ms / 1000) % 60;
+                            let ms = line.timestamp_ms % 1000;
+                            println!("[{:02}:{:02}.{:03}] {}", mins, secs, ms, line.text);
+                        }
+                        if lyrics.lines.len() > 20 {
+                            println!("... and {} more lines", lyrics.lines.len() - 20);
+                        }
+                    }
+                    modules::lyrics::LyricsStatus::NotFound => {
+                        println!("No synced lyrics found for this track");
+                    }
+                    modules::lyrics::LyricsStatus::Loading => {
+                        println!("Loading...");
+                    }
+                    modules::lyrics::LyricsStatus::Error(e) => {
+                        println!("Error fetching lyrics: {}", e);
+                    }
+                }
+            } else {
+                println!("Nothing playing");
+            }
+        }
     }
 
     Ok(())

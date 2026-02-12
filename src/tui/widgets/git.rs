@@ -253,6 +253,14 @@ impl Widget for HelpWidget<'_> {
                 Span::styled(" - Refresh git status", Style::default().fg(self.theme.foreground)),
             ]),
             Line::from(vec![
+                Span::styled("l", Style::default().fg(self.theme.accent)),
+                Span::styled(" - Toggle lyrics", Style::default().fg(self.theme.foreground)),
+            ]),
+            Line::from(vec![
+                Span::styled("a", Style::default().fg(self.theme.accent)),
+                Span::styled(" - Toggle art style", Style::default().fg(self.theme.foreground)),
+            ]),
+            Line::from(vec![
                 Span::styled("?", Style::default().fg(self.theme.accent)),
                 Span::styled(" - Toggle help", Style::default().fg(self.theme.foreground)),
             ]),
