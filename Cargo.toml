@@ -40,5 +40,9 @@ anyhow = "1"
 shellexpand = "3"
 open = "5"
 
+# Image processing for album art
+image = "0.25"
+ureq = "2"
+
 # Vendored OpenSSL for rspotify
 openssl = { version = "0.10", features = ["vendored"] }

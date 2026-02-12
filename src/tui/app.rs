@@ -25,17 +25,19 @@ use crate::modules::{
 };
 use crate::tui::theme::Theme;
 use crate::tui::widgets::{
+    album_art::{AlbumArtWidget, ArtStyle, ImageCache},
     git::{GitWidget, HelpWidget},
     spotify::SpotifyWidget,
     visualizer::{SpectrumWidget, WaveformWidget},
 };
+use image::DynamicImage;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Panel {
     Spotify,
     Spectrum,
     Waveform,
-    Git,
+    AlbumArt,
 }
 
 impl Panel {
@@ -43,8 +45,8 @@ impl Panel {
         match self {
             Panel::Spotify => Panel::Spectrum,
             Panel::Spectrum => Panel::Waveform,
-            Panel::Waveform => Panel::Git,
-            Panel::Git => Panel::Spotify,
+            Panel::Waveform => Panel::AlbumArt,
+            Panel::AlbumArt => Panel::Spotify,
         }
     }
 }
@@ -73,6 +75,11 @@ struct App {
     volume: u8,
     spotify_tx: mpsc::UnboundedSender<SpotifyCommand>,
     spotify_rx: mpsc::UnboundedReceiver<Option<TrackInfo>>,
+    // Album art
+    image_cache: ImageCache,
+    current_album_art: Option<DynamicImage>,
+    last_album_art_url: Option<String>,
+    art_style: ArtStyle,
 }
 
 impl App {
@@ -120,6 +127,11 @@ impl App {
             config,
             spotify_tx: cmd_tx,
             spotify_rx: track_rx,
+            // Album art
+            image_cache: ImageCache::new(),
+            current_album_art: None,
+            last_album_art_url: None,
+            art_style: ArtStyle::Braille,
         };
 
         // Initial git fetch
@@ -131,6 +143,15 @@ impl App {
     fn poll_spotify(&mut self) {
         // Non-blocking receive of track updates from background task
         while let Ok(track_info) = self.spotify_rx.try_recv() {
+            // Check if album art URL changed
+            let new_url = track_info.as_ref().and_then(|t| t.album_art_url.clone());
+            if new_url != self.last_album_art_url {
+                self.last_album_art_url = new_url.clone();
+                // Fetch new album art
+                self.current_album_art = new_url
+                    .as_ref()
+                    .and_then(|url| self.image_cache.get_or_fetch(url));
+            }
             self.track_info = track_info;
         }
     }
@@ -193,6 +214,13 @@ impl App {
             KeyCode::Char('r') => {
                 self.force_update_git();
             }
+            KeyCode::Char('a') => {
+                // Toggle album art style
+                self.art_style = match self.art_style {
+                    ArtStyle::Blocks => ArtStyle::Braille,
+                    ArtStyle::Braille => ArtStyle::Blocks,
+                };
+            }
             _ => {}
         }
         false
@@ -210,12 +238,12 @@ impl App {
             }
         }
 
-        // Stacked vertical layout: Spotify, Spectrum, Waveform, Git
+        // Stacked vertical layout: Spotify, Spectrum, Waveform, AlbumArt
         let rows = Layout::vertical([
             Constraint::Length(9),      // Spotify - fixed height for track info
             Constraint::Percentage(20), // Spectrum - smaller
             Constraint::Percentage(20), // Waveform - smaller
-            Constraint::Min(10),        // Git - more space
+            Constraint::Min(10),        // Album Art - more space
         ])
         .split(area);
 
@@ -241,13 +269,13 @@ impl App {
         );
         frame.render_widget(waveform_widget, rows[2]);
 
-        let git_widget = GitWidget::new(
-            &self.repo_statuses,
-            &self.commits,
+        let album_art_widget = AlbumArtWidget::new(
+            self.current_album_art.as_ref(),
             &self.theme,
-            self.focused_panel == Panel::Git,
+            self.focused_panel == Panel::AlbumArt,
+            self.art_style,
         );
-        frame.render_widget(git_widget, rows[3]);
+        frame.render_widget(album_art_widget, rows[3]);
 
         // Render help overlay if active
         if self.show_help {
