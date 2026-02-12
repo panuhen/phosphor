@@ -69,11 +69,9 @@ impl SpotifyClient {
         // Try to read cached token first
         match client.read_token_cache(false).await {
             Ok(Some(token)) => {
-                // Token loaded from cache
                 *client.token.lock().await.unwrap() = Some(token);
             }
             _ => {
-                // Need fresh auth - use local server to catch callback
                 let auth_url = client.get_authorize_url(None)?;
                 Self::authenticate_with_local_server(&mut client, &auth_url).await?;
             }
@@ -143,7 +141,7 @@ impl SpotifyClient {
             .await
         {
             Ok(ctx) => ctx,
-            Err(_) => return Ok(None), // Likely an ad or unsupported content
+            Err(_) => return Ok(None),
         };
 
         let Some(context) = context else {
@@ -184,6 +182,48 @@ impl SpotifyClient {
                 is_playing: context.is_playing,
                 album_art_url: episode.images.first().map(|i| i.url.clone()),
             },
+            PlayableItem::Unknown(v) => {
+                // rspotify sometimes fails to parse valid tracks, extract manually
+                let obj = v.as_object();
+                if let Some(obj) = obj {
+                    if obj.get("type").and_then(|t| t.as_str()) == Some("track") {
+                        let name = obj.get("name").and_then(|n| n.as_str()).unwrap_or("Unknown").to_string();
+                        let artists = obj.get("artists")
+                            .and_then(|a| a.as_array())
+                            .map(|arr| arr.iter()
+                                .filter_map(|a| a.get("name").and_then(|n| n.as_str()))
+                                .collect::<Vec<_>>()
+                                .join(", "))
+                            .unwrap_or_else(|| "Unknown".to_string());
+                        let album = obj.get("album")
+                            .and_then(|a| a.get("name"))
+                            .and_then(|n| n.as_str())
+                            .unwrap_or("Unknown")
+                            .to_string();
+                        let duration = obj.get("duration_ms")
+                            .and_then(|d| d.as_u64())
+                            .unwrap_or(0);
+                        let album_art_url = obj.get("album")
+                            .and_then(|a| a.get("images"))
+                            .and_then(|imgs| imgs.as_array())
+                            .and_then(|arr| arr.first())
+                            .and_then(|img| img.get("url"))
+                            .and_then(|u| u.as_str())
+                            .map(|s| s.to_string());
+
+                        return Ok(Some(TrackInfo {
+                            name,
+                            artist: artists,
+                            album,
+                            duration,
+                            progress: context.progress.map(|d| d.num_milliseconds() as u64),
+                            is_playing: context.is_playing,
+                            album_art_url,
+                        }));
+                    }
+                }
+                return Ok(None);
+            }
         };
 
         Ok(Some(track_info))

@@ -26,7 +26,7 @@ serde = { version = "1", features = ["derive"] }
 dirs = "5"
 
 # Spotify
-rspotify = { version = "0.13", features = ["cli"] }
+rspotify = { version = "0.15", features = ["cli"] }
 
 # Audio capture & FFT (optional, requires libasound2-dev on Linux)
 cpal = { version = "0.15", optional = true }
