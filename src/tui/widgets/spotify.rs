@@ -92,14 +92,13 @@ impl SpotifyWidget<'_> {
             self.render_progress(progress, track.duration, chunks[4], buf);
         }
 
-        // Controls hint
+        // Controls hint - retro icons, centered
         let controls = Line::from(vec![
-            Span::styled(
-                "  ⏮ p  ⏸ space  ⏭ n  🔊 +/-",
-                Style::default().fg(self.theme.dim),
-            ),
+            Span::styled("⏮ p  ⏸ space  ⏭ n  vol +/-", Style::default().fg(self.theme.dim)),
         ]);
-        Paragraph::new(controls).render(chunks[5], buf);
+        Paragraph::new(controls)
+            .alignment(Alignment::Center)
+            .render(chunks[5], buf);
     }
 
     fn render_progress(&self, progress: u64, duration: u64, area: Rect, buf: &mut Buffer) {
@@ -124,12 +123,14 @@ impl SpotifyWidget<'_> {
         );
 
         let bar = Line::from(vec![
-            Span::styled(format!("  {} ", progress_str), Style::default().fg(self.theme.dim)),
+            Span::styled(format!("{} ", progress_str), Style::default().fg(self.theme.dim)),
             Span::styled("█".repeat(filled), Style::default().fg(self.theme.accent)),
             Span::styled("░".repeat(empty), Style::default().fg(self.theme.dim)),
             Span::styled(format!(" {}", duration_str), Style::default().fg(self.theme.dim)),
         ]);
-        Paragraph::new(bar).render(area, buf);
+        Paragraph::new(bar)
+            .alignment(Alignment::Center)
+            .render(area, buf);
     }
 
     fn render_empty(&self, area: Rect, buf: &mut Buffer) {

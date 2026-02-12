@@ -5,7 +5,8 @@ use anyhow::Result;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    style::SetBackgroundColor,
+    terminal::{disable_raw_mode, enable_raw_mode, Clear as TermClear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{
     backend::CrosstermBackend,
@@ -41,9 +42,9 @@ impl Panel {
     fn next(self) -> Self {
         match self {
             Panel::Spotify => Panel::Spectrum,
-            Panel::Spectrum => Panel::Git,
-            Panel::Git => Panel::Waveform,
-            Panel::Waveform => Panel::Spotify,
+            Panel::Spectrum => Panel::Waveform,
+            Panel::Waveform => Panel::Git,
+            Panel::Git => Panel::Spotify,
         }
     }
 }
@@ -200,36 +201,45 @@ impl App {
     fn draw(&self, frame: &mut Frame) {
         let area = frame.area();
 
-        // Clear with background color
-        let bg_block = Block::default().style(Style::default().bg(self.theme.background));
-        frame.render_widget(bg_block, area);
+        // Fill entire background
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                frame.buffer_mut()[(x, y)]
+                    .set_bg(self.theme.background)
+                    .set_char(' ');
+            }
+        }
 
-        // Create layout based on config
-        let rows = Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(area);
+        // Stacked vertical layout: Spotify, Spectrum, Waveform, Git
+        let rows = Layout::vertical([
+            Constraint::Length(9),      // Spotify - fixed height for track info
+            Constraint::Percentage(20), // Spectrum - smaller
+            Constraint::Percentage(20), // Waveform - smaller
+            Constraint::Min(10),        // Git - more space
+        ])
+        .split(area);
 
-        let top_cols =
-            Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .split(rows[0]);
-
-        let bottom_cols =
-            Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .split(rows[1]);
-
-        // Render widgets
+        // Render widgets in stacked order
         let spotify_widget = SpotifyWidget::new(
             self.track_info.as_ref(),
             &self.theme,
             self.focused_panel == Panel::Spotify,
         );
-        frame.render_widget(spotify_widget, top_cols[0]);
+        frame.render_widget(spotify_widget, rows[0]);
 
         let spectrum_widget = SpectrumWidget::new(
             &self.audio_data,
             &self.theme,
             self.focused_panel == Panel::Spectrum,
         );
-        frame.render_widget(spectrum_widget, top_cols[1]);
+        frame.render_widget(spectrum_widget, rows[1]);
+
+        let waveform_widget = WaveformWidget::new(
+            &self.audio_data,
+            &self.theme,
+            self.focused_panel == Panel::Waveform,
+        );
+        frame.render_widget(waveform_widget, rows[2]);
 
         let git_widget = GitWidget::new(
             &self.repo_statuses,
@@ -237,14 +247,7 @@ impl App {
             &self.theme,
             self.focused_panel == Panel::Git,
         );
-        frame.render_widget(git_widget, bottom_cols[0]);
-
-        let waveform_widget = WaveformWidget::new(
-            &self.audio_data,
-            &self.theme,
-            self.focused_panel == Panel::Waveform,
-        );
-        frame.render_widget(waveform_widget, bottom_cols[1]);
+        frame.render_widget(git_widget, rows[3]);
 
         // Render help overlay if active
         if self.show_help {
@@ -333,10 +336,20 @@ pub async fn run() -> Result<()> {
     let config = Config::load()?;
     let fps = config.audio.fps;
 
-    // Setup terminal
+    // Parse background color for terminal clear
+    let bg_color = parse_hex_to_crossterm(&config.theme.background)
+        .unwrap_or(crossterm::style::Color::Rgb { r: 26, g: 16, b: 0 });
+
+    // Setup terminal with background color
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        SetBackgroundColor(bg_color),
+        TermClear(ClearType::All),
+        EnableMouseCapture
+    )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -381,4 +394,15 @@ pub async fn run() -> Result<()> {
     terminal.show_cursor()?;
 
     Ok(())
+}
+
+fn parse_hex_to_crossterm(hex: &str) -> Option<crossterm::style::Color> {
+    let hex = hex.trim_start_matches('#');
+    if hex.len() != 6 {
+        return None;
+    }
+    let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+    Some(crossterm::style::Color::Rgb { r, g, b })
 }
