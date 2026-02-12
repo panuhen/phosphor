@@ -52,9 +52,16 @@ impl SpectrumWidget<'_> {
             return;
         }
 
-        // Sample spectrum data to fit width (focus on lower frequencies)
-        let useful_bins = self.data.spectrum.len().min(width * 4);
+        // Focus on lower frequencies (more musical content there)
+        let useful_bins = self.data.spectrum.len().min(width * 2);
         let bins_per_bar = (useful_bins / width).max(1);
+
+        // Find max for normalization
+        let max_val = self.data.spectrum[..useful_bins]
+            .iter()
+            .cloned()
+            .fold(0.0f32, f32::max)
+            .max(0.0001); // Avoid division by zero
 
         for x in 0..width {
             let start = x * bins_per_bar;
@@ -68,8 +75,8 @@ impl SpectrumWidget<'_> {
             let avg: f32 = self.data.spectrum[start..end].iter().sum::<f32>()
                 / (end - start) as f32;
 
-            // Apply log scale and normalize
-            let normalized = (avg * 50.0).log10().max(0.0) / 2.0;
+            // Normalize to max and apply some boost for visibility
+            let normalized = (avg / max_val).sqrt(); // sqrt gives nicer curve
             let bar_height = (normalized * height as f32).min(height as f32) as usize;
 
             // Draw the bar from bottom up

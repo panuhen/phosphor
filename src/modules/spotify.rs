@@ -2,11 +2,13 @@ use anyhow::{Context, Result};
 use rspotify::{
     model::{AdditionalType, PlayableItem},
     prelude::*,
-    scopes, AuthCodeSpotify, Credentials, OAuth,
+    scopes, AuthCodePkceSpotify, Credentials, OAuth,
 };
 use std::path::PathBuf;
 
 use crate::config::Config;
+
+const DEFAULT_CLIENT_ID: &str = "1f14edc73f6548dc97f7791dfec833aa";
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -17,27 +19,34 @@ pub struct TrackInfo {
     pub duration: u64,
     pub progress: Option<u64>,
     pub is_playing: bool,
-    pub album_art_url: Option<String>,  // Kept for future album art rendering
+    pub album_art_url: Option<String>,
 }
 
 pub struct SpotifyClient {
-    client: AuthCodeSpotify,
+    client: AuthCodePkceSpotify,
 }
 
 impl SpotifyClient {
     pub async fn new(config: &Config) -> Result<Self> {
-        let creds = Credentials::from_env()
-            .or_else(|| {
+        // Use bundled client ID (PKCE doesn't need secret), allow override via env/config
+        let client_id = std::env::var("SPOTIPY_CLIENT_ID")
+            .or_else(|_| std::env::var("RSPOTIFY_CLIENT_ID"))
+            .unwrap_or_else(|_| {
                 if !config.spotify.client_id.is_empty() {
-                    Some(Credentials::new(&config.spotify.client_id, ""))
+                    config.spotify.client_id.clone()
                 } else {
-                    None
+                    DEFAULT_CLIENT_ID.to_string()
                 }
-            })
-            .context("Spotify credentials not found. Set RSPOTIFY_CLIENT_ID and RSPOTIFY_CLIENT_SECRET environment variables, or configure client_id in config.toml")?;
+            });
+
+        let creds = Credentials::new_pkce(&client_id);
+
+        let redirect_uri = std::env::var("SPOTIPY_REDIRECT_URI")
+            .or_else(|_| std::env::var("RSPOTIFY_REDIRECT_URI"))
+            .unwrap_or_else(|_| "http://127.0.0.1:8888/callback".to_string());
 
         let oauth = OAuth {
-            redirect_uri: "http://127.0.0.1:8888/callback".to_string(),
+            redirect_uri,
             scopes: scopes!(
                 "user-read-playback-state",
                 "user-modify-playback-state",
@@ -46,35 +55,38 @@ impl SpotifyClient {
             ..Default::default()
         };
 
-        let config_path = Self::cache_path();
         let config_rspotify = rspotify::Config {
-            cache_path: config_path,
+            cache_path: Self::cache_path(),
             token_cached: true,
             token_refreshing: true,
             ..Default::default()
         };
 
-        let client = AuthCodeSpotify::with_config(creds, oauth, config_rspotify);
+        let mut client = AuthCodePkceSpotify::with_config(creds, oauth, config_rspotify);
 
         // Try to read cached token, or prompt for auth
-        let url = client.get_authorize_url(false)?;
+        let url = client.get_authorize_url(None)?;
         client.prompt_for_token(&url).await?;
 
         Ok(Self { client })
     }
 
     fn cache_path() -> PathBuf {
-        dirs::config_dir()
+        dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("phosphor")
-            .join(".spotify_token_cache.json")
+            .join(".phosphor-spotify-token")
     }
 
     pub async fn get_current_track(&self) -> Result<Option<TrackInfo>> {
-        let context = self
+        // Handle parse errors gracefully (ads, unsupported content types, etc.)
+        let context = match self
             .client
             .current_playing(None, Some([&AdditionalType::Track]))
-            .await?;
+            .await
+        {
+            Ok(ctx) => ctx,
+            Err(_) => return Ok(None), // Likely an ad or unsupported content
+        };
 
         let Some(context) = context else {
             return Ok(None);
