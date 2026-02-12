@@ -16,11 +16,62 @@ pub struct AudioData {
     pub waveform: Vec<f32>,
 }
 
+/// Smoothed audio data with exponential decay for fluid animations
+pub struct SmoothedAudio {
+    spectrum: Vec<f32>,
+    waveform: Vec<f32>,
+    attack: f32,  // How fast values rise (0-1, higher = faster)
+    decay: f32,   // How fast values fall (0-1, higher = faster)
+}
+
+impl SmoothedAudio {
+    pub fn new(fft_size: usize, attack: f32, decay: f32) -> Self {
+        Self {
+            spectrum: vec![0.0; fft_size / 2],
+            waveform: vec![0.0; fft_size],
+            attack,
+            decay,
+        }
+    }
+
+    pub fn update(&mut self, data: &AudioData) -> AudioData {
+        // Smooth spectrum with asymmetric attack/decay
+        for (i, &target) in data.spectrum.iter().enumerate() {
+            if i < self.spectrum.len() {
+                let current = self.spectrum[i];
+                if target > current {
+                    self.spectrum[i] = current + (target - current) * self.attack;
+                } else {
+                    self.spectrum[i] = current + (target - current) * self.decay;
+                }
+            }
+        }
+
+        // Waveform uses faster response (it needs to track audio closely)
+        for (i, &target) in data.waveform.iter().enumerate() {
+            if i < self.waveform.len() {
+                self.waveform[i] = self.waveform[i] * 0.3 + target * 0.7;
+            }
+        }
+
+        AudioData {
+            spectrum: self.spectrum.clone(),
+            waveform: self.waveform.clone(),
+        }
+    }
+}
+
 #[cfg(feature = "audio")]
 pub struct AudioCapture {
     _stream: cpal::Stream,
     samples: Arc<Mutex<Vec<f32>>>,
     fft_size: usize,
+    fft: std::sync::Arc<dyn rustfft::Fft<f32>>,
+    window: Vec<f32>,
+    // Pre-allocated buffers
+    waveform_buf: Vec<f32>,
+    fft_buffer: Vec<Complex<f32>>,
+    spectrum_buf: Vec<f32>,
 }
 
 #[cfg(feature = "audio")]
@@ -135,41 +186,55 @@ impl AudioCapture {
 
         stream.play()?;
 
+        // Pre-compute FFT and window
+        let mut planner = FftPlanner::new();
+        let fft = planner.plan_fft_forward(fft_size);
+        let window: Vec<f32> = (0..fft_size)
+            .map(|i| 0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / fft_size as f32).cos()))
+            .collect();
+
+        // Pre-allocate buffers
+        let waveform_buf = vec![0.0f32; fft_size];
+        let fft_buffer = vec![Complex::new(0.0f32, 0.0f32); fft_size];
+        let spectrum_buf = vec![0.0f32; fft_size / 2];
+
         Ok(Self {
             _stream: stream,
             samples,
             fft_size,
+            fft,
+            window,
+            waveform_buf,
+            fft_buffer,
+            spectrum_buf,
         })
     }
 
-    pub fn get_data(&self) -> AudioData {
-        let samples = self.samples.lock().unwrap();
-        let waveform = samples.clone();
-
-        // Compute FFT
-        let mut planner = FftPlanner::new();
-        let fft = planner.plan_fft_forward(self.fft_size);
-
-        let mut buffer: Vec<Complex<f32>> = samples
-            .iter()
-            .map(|&s| Complex::new(s, 0.0))
-            .collect();
-
-        // Apply Hann window
-        for (i, sample) in buffer.iter_mut().enumerate() {
-            let window = 0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / self.fft_size as f32).cos());
-            sample.re *= window;
+    pub fn get_data(&mut self) -> AudioData {
+        // Copy samples with minimal lock time
+        {
+            let samples = self.samples.lock().unwrap();
+            self.waveform_buf.copy_from_slice(&samples);
         }
 
-        fft.process(&mut buffer);
+        // Apply window and prepare FFT input (no allocation)
+        for i in 0..self.fft_size {
+            self.fft_buffer[i] = Complex::new(self.waveform_buf[i] * self.window[i], 0.0);
+        }
 
-        // Convert to magnitude (only positive frequencies)
-        let spectrum: Vec<f32> = buffer[..self.fft_size / 2]
-            .iter()
-            .map(|c| (c.re * c.re + c.im * c.im).sqrt() / self.fft_size as f32)
-            .collect();
+        self.fft.process(&mut self.fft_buffer);
 
-        AudioData { spectrum, waveform }
+        // Compute spectrum magnitudes (no allocation)
+        let scale = 1.0 / self.fft_size as f32;
+        for i in 0..self.fft_size / 2 {
+            let c = &self.fft_buffer[i];
+            self.spectrum_buf[i] = (c.re * c.re + c.im * c.im).sqrt() * scale;
+        }
+
+        AudioData {
+            spectrum: self.spectrum_buf.clone(),
+            waveform: self.waveform_buf.clone(),
+        }
     }
 }
 
@@ -226,9 +291,44 @@ impl MockAudioCapture {
 // PulseAudio capture using parec - works with monitor sources
 #[cfg(feature = "audio")]
 pub struct PulseCapture {
-    samples: Arc<Mutex<Vec<f32>>>,
+    buffer: Arc<Mutex<RingBuffer>>,
     fft_size: usize,
+    fft: std::sync::Arc<dyn rustfft::Fft<f32>>,
+    window: Vec<f32>,
+    // Pre-allocated buffers to avoid per-frame allocations
+    waveform_buf: Vec<f32>,
+    fft_buffer: Vec<Complex<f32>>,
+    spectrum_buf: Vec<f32>,
     _handle: std::thread::JoinHandle<()>,
+}
+
+// Lock-free-ish ring buffer for audio samples
+#[cfg(feature = "audio")]
+struct RingBuffer {
+    data: Vec<f32>,
+    write_pos: usize,
+}
+
+#[cfg(feature = "audio")]
+impl RingBuffer {
+    fn new(size: usize) -> Self {
+        Self {
+            data: vec![0.0; size],
+            write_pos: 0,
+        }
+    }
+
+    fn push(&mut self, sample: f32) {
+        self.data[self.write_pos] = sample;
+        self.write_pos = (self.write_pos + 1) % self.data.len();
+    }
+
+    fn copy_ordered_into(&self, dest: &mut [f32]) {
+        let first_part = &self.data[self.write_pos..];
+        let second_part = &self.data[..self.write_pos];
+        dest[..first_part.len()].copy_from_slice(first_part);
+        dest[first_part.len()..].copy_from_slice(second_part);
+    }
 }
 
 #[cfg(feature = "audio")]
@@ -247,8 +347,8 @@ impl PulseCapture {
         let sink = String::from_utf8_lossy(&output.stdout).trim().to_string();
         let monitor = format!("{}.monitor", sink);
 
-        let samples: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(vec![0.0; fft_size]));
-        let samples_clone = samples.clone();
+        let buffer = Arc::new(Mutex::new(RingBuffer::new(fft_size)));
+        let buffer_clone = buffer.clone();
 
         // Spawn parec in a thread
         let handle = std::thread::spawn(move || {
@@ -258,7 +358,7 @@ impl PulseCapture {
                     "--format=float32le",
                     "--channels=1",
                     "--rate=48000",
-                    "--latency-msec=50",
+                    "--latency-msec=10",
                 ])
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
@@ -273,57 +373,74 @@ impl PulseCapture {
                 None => return,
             };
 
-            let mut buf = [0u8; 4096];
+            // Small buffer for low latency (64 samples = ~1.3ms at 48kHz)
+            let mut buf = [0u8; 256];
             loop {
                 match stdout.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
-                        let mut samples = samples_clone.lock().unwrap();
-                        for chunk in buf[..n].chunks_exact(4) {
-                            let sample = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-                            samples.push(sample);
-                            if samples.len() > fft_size {
-                                samples.remove(0);
+                        // Use try_lock to avoid blocking if main thread is reading
+                        if let Ok(mut ring) = buffer_clone.try_lock() {
+                            for chunk in buf[..n].chunks_exact(4) {
+                                let sample = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                                ring.push(sample);
                             }
                         }
+                        // If lock failed, just drop this batch - smoother than blocking
                     }
                     Err(_) => break,
                 }
             }
         });
 
+        // Pre-compute FFT and window function
+        let mut planner = FftPlanner::new();
+        let fft = planner.plan_fft_forward(fft_size);
+        let window: Vec<f32> = (0..fft_size)
+            .map(|i| 0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / fft_size as f32).cos()))
+            .collect();
+
+        // Pre-allocate buffers
+        let waveform_buf = vec![0.0f32; fft_size];
+        let fft_buffer = vec![Complex::new(0.0f32, 0.0f32); fft_size];
+        let spectrum_buf = vec![0.0f32; fft_size / 2];
+
         Ok(Self {
-            samples,
+            buffer,
             fft_size,
+            fft,
+            window,
+            waveform_buf,
+            fft_buffer,
+            spectrum_buf,
             _handle: handle,
         })
     }
 
-    pub fn get_data(&self) -> AudioData {
-        let samples = self.samples.lock().unwrap();
-        let waveform = samples.clone();
-
-        let mut planner = FftPlanner::new();
-        let fft = planner.plan_fft_forward(self.fft_size);
-
-        let mut buffer: Vec<Complex<f32>> = samples
-            .iter()
-            .map(|&s| Complex::new(s, 0.0))
-            .collect();
-
-        for (i, sample) in buffer.iter_mut().enumerate() {
-            let window = 0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / self.fft_size as f32).cos());
-            sample.re *= window;
+    pub fn get_data(&mut self) -> AudioData {
+        // Try to copy from ring buffer - skip if locked (don't block render)
+        if let Ok(ring) = self.buffer.try_lock() {
+            ring.copy_ordered_into(&mut self.waveform_buf);
         }
 
-        fft.process(&mut buffer);
+        // Apply window and prepare FFT input (no allocation)
+        for i in 0..self.fft_size {
+            self.fft_buffer[i] = Complex::new(self.waveform_buf[i] * self.window[i], 0.0);
+        }
 
-        let spectrum: Vec<f32> = buffer[..self.fft_size / 2]
-            .iter()
-            .map(|c| (c.re * c.re + c.im * c.im).sqrt() / self.fft_size as f32)
-            .collect();
+        self.fft.process(&mut self.fft_buffer);
 
-        AudioData { spectrum, waveform }
+        // Compute spectrum magnitudes (no allocation)
+        let scale = 1.0 / self.fft_size as f32;
+        for i in 0..self.fft_size / 2 {
+            let c = &self.fft_buffer[i];
+            self.spectrum_buf[i] = (c.re * c.re + c.im * c.im).sqrt() * scale;
+        }
+
+        AudioData {
+            spectrum: self.spectrum_buf.clone(),
+            waveform: self.waveform_buf.clone(),
+        }
     }
 }
 

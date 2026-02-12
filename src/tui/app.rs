@@ -14,10 +14,11 @@ use ratatui::{
     widgets::{Block, Clear},
     Frame, Terminal,
 };
+use tokio::sync::mpsc;
 
 use crate::config::Config;
 use crate::modules::{
-    audio::{AudioData, AudioSource},
+    audio::{AudioData, AudioSource, SmoothedAudio},
     git::{CommitInfo, GitTracker, RepoStatus},
     spotify::{SpotifyClient, TrackInfo},
 };
@@ -47,11 +48,19 @@ impl Panel {
     }
 }
 
+enum SpotifyCommand {
+    Refresh,
+    TogglePlayback,
+    Next,
+    Prev,
+    SetVolume(u8),
+}
+
 struct App {
     config: Config,
     theme: Theme,
-    spotify: Option<SpotifyClient>,
     audio: AudioSource,
+    audio_smoother: SmoothedAudio,
     git: GitTracker,
     track_info: Option<TrackInfo>,
     audio_data: AudioData,
@@ -59,17 +68,15 @@ struct App {
     commits: Vec<CommitInfo>,
     focused_panel: Panel,
     show_help: bool,
-    last_spotify_update: Instant,
     last_git_update: Instant,
     volume: u8,
+    spotify_tx: mpsc::UnboundedSender<SpotifyCommand>,
+    spotify_rx: mpsc::UnboundedReceiver<Option<TrackInfo>>,
 }
 
 impl App {
     async fn new(config: Config) -> Result<Self> {
         let theme = Theme::from_config(&config.theme);
-
-        // Initialize Spotify (may fail if not configured)
-        let spotify = SpotifyClient::new(&config).await.ok();
 
         // Initialize audio capture
         let audio = AudioSource::new(&config.audio.device, config.audio.fft_size);
@@ -77,10 +84,26 @@ impl App {
         // Initialize git tracker
         let git = GitTracker::new(&config.git.repos);
 
+        // Set up channels for async Spotify communication
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<SpotifyCommand>();
+        let (track_tx, track_rx) = mpsc::unbounded_channel::<Option<TrackInfo>>();
+
+        // Spawn background Spotify task
+        let config_clone = config.clone();
+        tokio::spawn(async move {
+            spotify_background_task(config_clone, cmd_rx, track_tx).await;
+        });
+
+        // Request initial track info
+        let _ = cmd_tx.send(SpotifyCommand::Refresh);
+
+        // Smoother with fast attack (0.6) and slower decay (0.15) for nice visuals
+        let audio_smoother = SmoothedAudio::new(config.audio.fft_size, 0.6, 0.15);
+
         let mut app = Self {
             theme,
-            spotify,
             audio,
+            audio_smoother,
             git,
             track_info: None,
             audio_data: AudioData {
@@ -91,27 +114,23 @@ impl App {
             commits: Vec::new(),
             focused_panel: Panel::Spotify,
             show_help: false,
-            last_spotify_update: Instant::now() - Duration::from_secs(10),
             last_git_update: Instant::now() - Duration::from_secs(10),
             volume: 50,
             config,
+            spotify_tx: cmd_tx,
+            spotify_rx: track_rx,
         };
 
-        // Initial data fetch
-        app.update_spotify().await;
+        // Initial git fetch
         app.update_git();
 
         Ok(app)
     }
 
-    async fn update_spotify(&mut self) {
-        if self.last_spotify_update.elapsed() < Duration::from_secs(1) {
-            return;
-        }
-        self.last_spotify_update = Instant::now();
-
-        if let Some(ref spotify) = self.spotify {
-            self.track_info = spotify.get_current_track().await.ok().flatten();
+    fn poll_spotify(&mut self) {
+        // Non-blocking receive of track updates from background task
+        while let Ok(track_info) = self.spotify_rx.try_recv() {
+            self.track_info = track_info;
         }
     }
 
@@ -134,10 +153,11 @@ impl App {
     }
 
     fn update_audio(&mut self) {
-        self.audio_data = self.audio.get_data();
+        let raw_data = self.audio.get_data();
+        self.audio_data = self.audio_smoother.update(&raw_data);
     }
 
-    async fn handle_key(&mut self, code: KeyCode) -> bool {
+    fn handle_key(&mut self, code: KeyCode) -> bool {
         match code {
             KeyCode::Char('q') | KeyCode::Esc => {
                 if self.show_help {
@@ -153,34 +173,21 @@ impl App {
                 self.focused_panel = self.focused_panel.next();
             }
             KeyCode::Char(' ') => {
-                if let Some(ref spotify) = self.spotify {
-                    let _ = spotify.toggle_playback().await;
-                    self.last_spotify_update = Instant::now() - Duration::from_secs(10);
-                }
+                let _ = self.spotify_tx.send(SpotifyCommand::TogglePlayback);
             }
             KeyCode::Char('n') => {
-                if let Some(ref spotify) = self.spotify {
-                    let _ = spotify.next().await;
-                    self.last_spotify_update = Instant::now() - Duration::from_secs(10);
-                }
+                let _ = self.spotify_tx.send(SpotifyCommand::Next);
             }
             KeyCode::Char('p') => {
-                if let Some(ref spotify) = self.spotify {
-                    let _ = spotify.prev().await;
-                    self.last_spotify_update = Instant::now() - Duration::from_secs(10);
-                }
+                let _ = self.spotify_tx.send(SpotifyCommand::Prev);
             }
             KeyCode::Char('+') | KeyCode::Char('=') => {
-                if let Some(ref spotify) = self.spotify {
-                    self.volume = (self.volume + 5).min(100);
-                    let _ = spotify.set_volume(self.volume).await;
-                }
+                self.volume = (self.volume + 5).min(100);
+                let _ = self.spotify_tx.send(SpotifyCommand::SetVolume(self.volume));
             }
             KeyCode::Char('-') => {
-                if let Some(ref spotify) = self.spotify {
-                    self.volume = self.volume.saturating_sub(5);
-                    let _ = spotify.set_volume(self.volume).await;
-                }
+                self.volume = self.volume.saturating_sub(5);
+                let _ = self.spotify_tx.send(SpotifyCommand::SetVolume(self.volume));
             }
             KeyCode::Char('r') => {
                 self.force_update_git();
@@ -252,6 +259,60 @@ impl App {
     }
 }
 
+async fn spotify_background_task(
+    config: Config,
+    mut cmd_rx: mpsc::UnboundedReceiver<SpotifyCommand>,
+    track_tx: mpsc::UnboundedSender<Option<TrackInfo>>,
+) {
+    // Initialize Spotify client (may fail if not configured)
+    let spotify = match SpotifyClient::new(&config).await {
+        Ok(client) => client,
+        Err(_) => return, // No Spotify, exit task
+    };
+
+    let mut last_refresh = Instant::now() - Duration::from_secs(10);
+    let refresh_interval = Duration::from_secs(1);
+
+    loop {
+        // Process any pending commands (non-blocking)
+        while let Ok(cmd) = cmd_rx.try_recv() {
+            match cmd {
+                SpotifyCommand::Refresh => {
+                    // Force refresh on next iteration
+                    last_refresh = Instant::now() - Duration::from_secs(10);
+                }
+                SpotifyCommand::TogglePlayback => {
+                    let _ = spotify.toggle_playback().await;
+                    last_refresh = Instant::now() - Duration::from_secs(10);
+                }
+                SpotifyCommand::Next => {
+                    let _ = spotify.next().await;
+                    last_refresh = Instant::now() - Duration::from_secs(10);
+                }
+                SpotifyCommand::Prev => {
+                    let _ = spotify.prev().await;
+                    last_refresh = Instant::now() - Duration::from_secs(10);
+                }
+                SpotifyCommand::SetVolume(vol) => {
+                    let _ = spotify.set_volume(vol).await;
+                }
+            }
+        }
+
+        // Periodic track info refresh
+        if last_refresh.elapsed() >= refresh_interval {
+            last_refresh = Instant::now();
+            let track_info = spotify.get_current_track().await.ok().flatten();
+            if track_tx.send(track_info).is_err() {
+                break; // Main app closed
+            }
+        }
+
+        // Small sleep to avoid busy-spinning
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
     let popup_layout = Layout::vertical([
         Constraint::Percentage((100 - percent_y) / 2),
@@ -294,7 +355,7 @@ pub async fn run() -> Result<()> {
         if event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
-                    if app.handle_key(key.code).await {
+                    if app.handle_key(key.code) {
                         break;
                     }
                 }
@@ -305,7 +366,7 @@ pub async fn run() -> Result<()> {
         if last_tick.elapsed() >= tick_rate {
             last_tick = Instant::now();
             app.update_audio();
-            app.update_spotify().await;
+            app.poll_spotify(); // Non-blocking check for track updates
             app.update_git();
         }
     }
