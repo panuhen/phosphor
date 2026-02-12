@@ -4,6 +4,8 @@ use rspotify::{
     prelude::*,
     scopes, AuthCodePkceSpotify, Credentials, OAuth,
 };
+use std::io::{BufRead, BufReader, Write};
+use std::net::TcpListener;
 use std::path::PathBuf;
 
 use crate::config::Config;
@@ -64,11 +66,65 @@ impl SpotifyClient {
 
         let mut client = AuthCodePkceSpotify::with_config(creds, oauth, config_rspotify);
 
-        // Try to read cached token, or prompt for auth
-        let url = client.get_authorize_url(None)?;
-        client.prompt_for_token(&url).await?;
+        // Try to read cached token first
+        let token = client.read_token_cache(false).await;
+        if token.is_ok_and(|t| t.is_some()) {
+            // Token loaded from cache
+            *client.token.lock().await.unwrap() = token.unwrap();
+        } else {
+            // Need fresh auth - use local server to catch callback
+            let auth_url = client.get_authorize_url(None)?;
+            Self::authenticate_with_local_server(&mut client, &auth_url).await?;
+        }
 
         Ok(Self { client })
+    }
+
+    async fn authenticate_with_local_server(
+        client: &mut AuthCodePkceSpotify,
+        auth_url: &str,
+    ) -> Result<()> {
+        // Start local server to catch the callback
+        let listener = TcpListener::bind("127.0.0.1:8888")
+            .context("Failed to bind to port 8888 for OAuth callback")?;
+
+        // Open browser for auth
+        if open::that(auth_url).is_err() {
+            eprintln!("Please open this URL in your browser:\n{}", auth_url);
+        }
+
+        // Wait for the callback
+        let (mut stream, _) = listener
+            .accept()
+            .context("Failed to accept OAuth callback")?;
+
+        let mut reader = BufReader::new(&stream);
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line)?;
+
+        // Extract the code from the callback URL
+        // Format: GET /callback?code=XXX HTTP/1.1
+        let url = request_line
+            .split_whitespace()
+            .nth(1)
+            .context("Invalid callback request")?;
+
+        let code = url
+            .split("code=")
+            .nth(1)
+            .and_then(|s| s.split('&').next())
+            .context("No code in callback URL")?;
+
+        // Send a nice response to the browser
+        let response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n\
+            <html><body><h1>Authentication successful!</h1>\
+            <p>You can close this window and return to phosphor.</p></body></html>";
+        stream.write_all(response.as_bytes())?;
+
+        // Exchange code for token
+        client.request_token(code).await?;
+
+        Ok(())
     }
 
     fn cache_path() -> PathBuf {
