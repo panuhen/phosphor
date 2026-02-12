@@ -6,7 +6,7 @@ description = "Retro terminal dashboard with amber CRT aesthetic"
 authors = ["phosphor"]
 
 [features]
-default = []
+default = ["audio"]
 audio = ["cpal"]
 
 [dependencies]

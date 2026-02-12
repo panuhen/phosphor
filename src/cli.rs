@@ -21,6 +21,11 @@ pub enum Commands {
         #[command(subcommand)]
         command: GitCommands,
     },
+    /// Audio device management
+    Audio {
+        #[command(subcommand)]
+        command: AudioCommands,
+    },
     /// Configuration management
     Config {
         #[command(subcommand)]
@@ -61,4 +66,10 @@ pub enum ConfigCommands {
     Edit,
     /// Print config file path
     Path,
+}
+
+#[derive(Subcommand)]
+pub enum AudioCommands {
+    /// List available audio input devices
+    Devices,
 }

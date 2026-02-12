@@ -5,6 +5,10 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use rustfft::{num_complex::Complex, FftPlanner};
 #[cfg(feature = "audio")]
 use std::sync::{Arc, Mutex};
+#[cfg(feature = "audio")]
+use std::io::Read;
+#[cfg(feature = "audio")]
+use std::process::{Command, Stdio};
 
 #[derive(Clone)]
 pub struct AudioData {
@@ -219,18 +223,135 @@ impl MockAudioCapture {
     }
 }
 
+// PulseAudio capture using parec - works with monitor sources
+#[cfg(feature = "audio")]
+pub struct PulseCapture {
+    samples: Arc<Mutex<Vec<f32>>>,
+    fft_size: usize,
+    _handle: std::thread::JoinHandle<()>,
+}
+
+#[cfg(feature = "audio")]
+impl PulseCapture {
+    pub fn new(fft_size: usize) -> Result<Self> {
+        // Get default monitor source
+        let output = Command::new("pactl")
+            .args(["get-default-sink"])
+            .output()
+            .context("pactl not found")?;
+
+        if !output.status.success() {
+            anyhow::bail!("Failed to get default sink");
+        }
+
+        let sink = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let monitor = format!("{}.monitor", sink);
+
+        let samples: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(vec![0.0; fft_size]));
+        let samples_clone = samples.clone();
+
+        // Spawn parec in a thread
+        let handle = std::thread::spawn(move || {
+            let mut child = match Command::new("parec")
+                .args([
+                    "--device", &monitor,
+                    "--format=float32le",
+                    "--channels=1",
+                    "--rate=48000",
+                    "--latency-msec=50",
+                ])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+            {
+                Ok(c) => c,
+                Err(_) => return,
+            };
+
+            let mut stdout = match child.stdout.take() {
+                Some(s) => s,
+                None => return,
+            };
+
+            let mut buf = [0u8; 4096];
+            loop {
+                match stdout.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let mut samples = samples_clone.lock().unwrap();
+                        for chunk in buf[..n].chunks_exact(4) {
+                            let sample = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                            samples.push(sample);
+                            if samples.len() > fft_size {
+                                samples.remove(0);
+                            }
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        Ok(Self {
+            samples,
+            fft_size,
+            _handle: handle,
+        })
+    }
+
+    pub fn get_data(&self) -> AudioData {
+        let samples = self.samples.lock().unwrap();
+        let waveform = samples.clone();
+
+        let mut planner = FftPlanner::new();
+        let fft = planner.plan_fft_forward(self.fft_size);
+
+        let mut buffer: Vec<Complex<f32>> = samples
+            .iter()
+            .map(|&s| Complex::new(s, 0.0))
+            .collect();
+
+        for (i, sample) in buffer.iter_mut().enumerate() {
+            let window = 0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / self.fft_size as f32).cos());
+            sample.re *= window;
+        }
+
+        fft.process(&mut buffer);
+
+        let spectrum: Vec<f32> = buffer[..self.fft_size / 2]
+            .iter()
+            .map(|c| (c.re * c.re + c.im * c.im).sqrt() / self.fft_size as f32)
+            .collect();
+
+        AudioData { spectrum, waveform }
+    }
+}
+
 pub enum AudioSource {
     #[cfg(feature = "audio")]
-    Real(AudioCapture),
+    Pulse(PulseCapture),
+    #[cfg(feature = "audio")]
+    Cpal(AudioCapture),
     Mock(MockAudioCapture),
 }
 
 impl AudioSource {
     #[cfg(feature = "audio")]
     pub fn new(device_name: &str, fft_size: usize) -> Self {
+        // Try PulseAudio first (works with monitor sources)
+        if device_name.is_empty() {
+            if let Ok(capture) = PulseCapture::new(fft_size) {
+                return AudioSource::Pulse(capture);
+            }
+        }
+
+        // Fall back to cpal for explicit device names
         match AudioCapture::new(device_name, fft_size) {
-            Ok(capture) => AudioSource::Real(capture),
-            Err(_) => AudioSource::Mock(MockAudioCapture::new(fft_size)),
+            Ok(capture) => AudioSource::Cpal(capture),
+            Err(e) => {
+                eprintln!("Audio capture failed: {}. Using mock audio.", e);
+                AudioSource::Mock(MockAudioCapture::new(fft_size))
+            }
         }
     }
 
@@ -242,7 +363,9 @@ impl AudioSource {
     pub fn get_data(&mut self) -> AudioData {
         match self {
             #[cfg(feature = "audio")]
-            AudioSource::Real(capture) => capture.get_data(),
+            AudioSource::Pulse(capture) => capture.get_data(),
+            #[cfg(feature = "audio")]
+            AudioSource::Cpal(capture) => capture.get_data(),
             AudioSource::Mock(mock) => mock.get_data(),
         }
     }

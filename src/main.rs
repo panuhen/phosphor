@@ -5,7 +5,7 @@ mod tui;
 
 use anyhow::Result;
 use clap::Parser;
-use cli::{Cli, Commands, GitCommands, SpotifyCommands, ConfigCommands};
+use cli::{Cli, Commands, GitCommands, SpotifyCommands, ConfigCommands, AudioCommands};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -14,6 +14,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Some(Commands::Spotify { command }) => handle_spotify(command).await?,
         Some(Commands::Git { command }) => handle_git(command).await?,
+        Some(Commands::Audio { command }) => handle_audio(command)?,
         Some(Commands::Config { command }) => handle_config(command)?,
         None => tui::run().await?,
     }
@@ -131,5 +132,51 @@ fn handle_config(command: ConfigCommands) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+#[cfg(feature = "audio")]
+fn handle_audio(command: AudioCommands) -> Result<()> {
+    use cpal::traits::{DeviceTrait, HostTrait};
+
+    match command {
+        AudioCommands::Devices => {
+            let host = cpal::default_host();
+
+            // Get default monitor source name
+            let default_monitor = std::process::Command::new("pactl")
+                .args(["get-default-sink"])
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| format!("{}.monitor", String::from_utf8_lossy(&o.stdout).trim()));
+
+            println!("Audio input devices (cpal):");
+            println!("─────────────────────────────");
+
+            if let Ok(devices) = host.input_devices() {
+                for device in devices {
+                    let name = device.name().unwrap_or_else(|_| "Unknown".to_string());
+                    let is_default = default_monitor.as_ref().map_or(false, |m| name.contains(m));
+                    let marker = if is_default { " ← default monitor" } else { "" };
+                    println!("  {}{}", name, marker);
+                }
+            }
+
+            println!();
+            println!("PulseAudio/PipeWire sources (pactl):");
+            println!("─────────────────────────────────────");
+            let _ = std::process::Command::new("pactl")
+                .args(["list", "short", "sources"])
+                .status();
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(not(feature = "audio"))]
+fn handle_audio(_command: AudioCommands) -> Result<()> {
+    println!("Audio feature not enabled. Rebuild with: cargo build --features audio");
     Ok(())
 }
