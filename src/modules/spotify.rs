@@ -67,14 +67,16 @@ impl SpotifyClient {
         let mut client = AuthCodePkceSpotify::with_config(creds, oauth, config_rspotify);
 
         // Try to read cached token first
-        let token = client.read_token_cache(false).await;
-        if token.is_ok_and(|t| t.is_some()) {
-            // Token loaded from cache
-            *client.token.lock().await.unwrap() = token.unwrap();
-        } else {
-            // Need fresh auth - use local server to catch callback
-            let auth_url = client.get_authorize_url(None)?;
-            Self::authenticate_with_local_server(&mut client, &auth_url).await?;
+        match client.read_token_cache(false).await {
+            Ok(Some(token)) => {
+                // Token loaded from cache
+                *client.token.lock().await.unwrap() = Some(token);
+            }
+            _ => {
+                // Need fresh auth - use local server to catch callback
+                let auth_url = client.get_authorize_url(None)?;
+                Self::authenticate_with_local_server(&mut client, &auth_url).await?;
+            }
         }
 
         Ok(Self { client })
