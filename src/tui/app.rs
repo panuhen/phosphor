@@ -302,9 +302,9 @@ impl App {
         let rows = if self.show_lyrics {
             Layout::vertical([
                 Constraint::Length(9),      // Spotify - fixed height for track info
-                Constraint::Min(8),         // Lyrics - takes album art space
-                Constraint::Percentage(15), // Spectrum - smaller
-                Constraint::Percentage(15), // Waveform - smaller
+                Constraint::Min(10),        // Lyrics - same size as album art
+                Constraint::Percentage(20), // Spectrum
+                Constraint::Percentage(20), // Waveform
             ])
             .split(area)
         } else {
@@ -483,6 +483,9 @@ pub async fn run() -> Result<()> {
 
     let tick_rate = Duration::from_millis(1000 / fps as u64);
     let mut last_tick = Instant::now();
+
+    // Force full redraw on first frame so ratatui's diff buffer is in sync
+    terminal.clear()?;
 
     loop {
         // Draw

@@ -43,7 +43,7 @@ urlencoding = "2"
 
 # Image processing for album art
 image = "0.25"
-ureq = { version = "2", features = ["json"] }
+ureq = { version = "2", default-features = false, features = ["json", "tls"] }
 
 # Vendored OpenSSL for rspotify
 openssl = { version = "0.10", features = ["vendored"] }

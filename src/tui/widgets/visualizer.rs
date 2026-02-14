@@ -150,6 +150,12 @@ impl WaveformWidget<'_> {
         let samples_per_point = self.data.waveform.len() / width;
         let mid_y = height / 2;
 
+        // Normalize to peak amplitude so waveform fills the full height
+        // Floor of 0.2 prevents quiet audio from being overamplified
+        let peak = self.data.waveform.iter()
+            .fold(0.0f32, |acc, &s| acc.max(s.abs()))
+            .max(0.0005);
+
         for x in 0..width {
             let start = x * samples_per_point;
             let end = ((x + 1) * samples_per_point).min(self.data.waveform.len());
@@ -162,6 +168,10 @@ impl WaveformWidget<'_> {
             let slice = &self.data.waveform[start..end];
             let min_val = slice.iter().cloned().fold(f32::INFINITY, f32::min);
             let max_val = slice.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+
+            // Normalize to peak so waveform fills full height
+            let min_val = (min_val / peak).clamp(-1.0, 1.0);
+            let max_val = (max_val / peak).clamp(-1.0, 1.0);
 
             // Convert to screen coordinates
             let y_min = ((1.0 - max_val) * 0.5 * height as f32) as usize;
@@ -176,7 +186,7 @@ impl WaveformWidget<'_> {
                 let cell_y = area.y + y as u16;
 
                 let distance_from_center = ((y as i32 - mid_y as i32).abs() as f32) / (height as f32 / 2.0);
-                let intensity = 1.0 - distance_from_center * 0.5;
+                let intensity = (1.0 - distance_from_center * 0.3).max(0.5);
                 let color = self.theme.gradient(intensity);
 
                 buf[(cell_x, cell_y)]
